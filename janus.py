@@ -18,9 +18,12 @@ import struct
 import hashlib
 from zlib import adler32
 
-
 FILE_HEADER_SIGNATURE = b'PK\x01\x02'
 END_OF_CENTRAL_DIRECTORY_SIGNATURE = b'PK\x05\x06'
+
+
+def log(message):
+    print(f'   - {message}')
 
 
 def update_checksum(data):
@@ -143,7 +146,9 @@ def join_the_files(dex_data, apk_data):
     :return: Data of the two files merged, with correct length and checksum
     """
     out_data = dex_data + apk_data
+    log(f'Updating data length to {len(out_data)}')
     update_data_length(out_data)
+    log(f'Updating checksum')
     update_checksum(out_data)
     return out_data
 
@@ -153,24 +158,33 @@ def join_the_files(dex_data, apk_data):
 @click.argument('apk', required=True, type=click.File('rb'))
 @click.argument('out_apk', required=True, type=click.File('wb'))
 def main(dex, apk, out_apk):
+    print(f'Merging files {dex.name} and {apk.name}, result will be written to {out_apk.name}')
     dex_data = bytearray(dex.read())
     dex_size = len(dex_data)
 
+    log(f'DEX file has size {dex_size}')
+
     apk_data = bytearray(apk.read())
 
-    cd_end_addr = get_central_directory_end(apk_data)
-    cd_start_addr = get_central_directory_start(apk_data, cd_end_addr)
+    cd_end_offset = get_central_directory_end(apk_data)
+    cd_start_offset = get_central_directory_start(apk_data, cd_end_offset)
 
-    update_cd_start_offset(apk_data, cd_end_addr, struct.pack("<L", cd_start_addr + dex_size))
+    log(f'Start of the Central Directory: {cd_start_offset}')
+    log(f'End of the Central Directory section: {cd_end_offset}')
+
+    update_cd_start_offset(apk_data, cd_end_offset, struct.pack("<L", cd_start_offset + dex_size))
+
+    log(f'Start of the Central Directory offset updated: {cd_start_offset} ---> {cd_start_offset + dex_size}')
 
     # Before merging the DEX to the APK,
     # all relative offsets within the APK
     # must be updated
-    current_cd_file_header = cd_start_addr
-    while current_cd_file_header < cd_end_addr:
+    log(f'Updated local header offsets')
+    current_cd_file_header = cd_start_offset
+    while current_cd_file_header < cd_end_offset:
         local_header_offset = get_local_header_offset(apk_data, current_cd_file_header)
         update_local_header_offset(apk_data, struct.pack("<L", local_header_offset + dex_size), current_cd_file_header)
-        current_cd_file_header = get_next_file_header_offset(apk_data, current_cd_file_header + 46, cd_end_addr)
+        current_cd_file_header = get_next_file_header_offset(apk_data, current_cd_file_header + 46, cd_end_offset)
         if current_cd_file_header == -1:
             break
 
