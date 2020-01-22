@@ -1,4 +1,6 @@
 .idea
-__*
+__venv*
+test
 *.apk
 update
+*pycache*
