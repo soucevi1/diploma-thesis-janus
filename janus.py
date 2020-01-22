@@ -153,6 +153,24 @@ def join_the_files(dex_data, apk_data):
     return out_data
 
 
+def update_offsets(apk_data, cd_end_offset, cd_start_offset, dex_size):
+    update_cd_start_offset(apk_data, cd_end_offset, struct.pack("<L", cd_start_offset + dex_size))
+
+    log(f'Start of the Central Directory offset updated: {cd_start_offset} ---> {cd_start_offset + dex_size}')
+
+    # Before merging the DEX to the APK,
+    # all relative offsets within the APK
+    # must be updated
+    log(f'Updated local header offsets')
+    current_cd_file_header = cd_start_offset
+    while current_cd_file_header < cd_end_offset:
+        local_header_offset = get_local_header_offset(apk_data, current_cd_file_header)
+        update_local_header_offset(apk_data, struct.pack("<L", local_header_offset + dex_size), current_cd_file_header)
+        current_cd_file_header = get_next_file_header_offset(apk_data, current_cd_file_header + 46, cd_end_offset)
+        if current_cd_file_header == -1:
+            break
+
+
 @click.command()
 @click.argument('dex', required=True, type=click.File('rb'))
 @click.argument('apk', required=True, type=click.File('rb'))
@@ -172,21 +190,7 @@ def main(dex, apk, out_apk):
     log(f'Start of the Central Directory: {cd_start_offset}')
     log(f'End of the Central Directory section: {cd_end_offset}')
 
-    update_cd_start_offset(apk_data, cd_end_offset, struct.pack("<L", cd_start_offset + dex_size))
-
-    log(f'Start of the Central Directory offset updated: {cd_start_offset} ---> {cd_start_offset + dex_size}')
-
-    # Before merging the DEX to the APK,
-    # all relative offsets within the APK
-    # must be updated
-    log(f'Updated local header offsets')
-    current_cd_file_header = cd_start_offset
-    while current_cd_file_header < cd_end_offset:
-        local_header_offset = get_local_header_offset(apk_data, current_cd_file_header)
-        update_local_header_offset(apk_data, struct.pack("<L", local_header_offset + dex_size), current_cd_file_header)
-        current_cd_file_header = get_next_file_header_offset(apk_data, current_cd_file_header + 46, cd_end_offset)
-        if current_cd_file_header == -1:
-            break
+    update_offsets(apk_data, cd_end_offset, cd_start_offset, dex_size)
 
     out_data = join_the_files(dex_data, apk_data)
 
