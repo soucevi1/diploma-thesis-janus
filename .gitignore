@@ -4,3 +4,6 @@ test
 *.apk
 update
 *pycache*
+build
+dist
+*egg-info*
